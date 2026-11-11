@@ -555,7 +555,7 @@ router.get('/:id/text', async (req: Request, res: Response) => {
 // POST /api/documents
 router.post('/', handleUpload, async (req, res) => {
   const userId = res.locals.userId as number;
-  const file = req.file;
+  const file: any = req.file;
 
   if (!file) {
     return res.status(400).json({

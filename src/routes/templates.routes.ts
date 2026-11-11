@@ -5,6 +5,7 @@ import { extractDocumentText } from '../services/document-extractor.service';
 import path from 'node:path';
 import { generateDocxFromMappings } from '../services/document-generator-a2.service';
 import fs from 'node:fs/promises';
+import { generatePdfFromMappings } from '../services/pdf-generator.service';
 
 const router = Router();
 
@@ -460,24 +461,42 @@ router.get('/:id', async (req, res) => {
       }
     }
 
-    // 3. Obtener los campos configurados.
-    const [fields]: any = await pool.query(
-      `
-      SELECT
-        id,
-        field_key,
-        label,
-        field_type,
-        required,
-        placeholder,
-        options_json,
-        sort_order
-      FROM template_fields
-      WHERE template_id = ?
-      ORDER BY sort_order ASC, id ASC
-      `,
-      [templateId]
-    );
+    
+// 3. Obtener los campos configurados y su estado de asociación.
+  const [fields]: any = await pool.query(
+    `
+    SELECT
+      tf.id,
+      tf.field_key,
+      tf.label,
+      tf.field_type,
+      tf.required,
+      tf.placeholder,
+      tf.options_json,
+      tf.sort_order,
+
+      (
+        SELECT COUNT(*)
+        FROM template_field_mappings tfm
+        WHERE tfm.template_field_id = tf.id
+      ) AS mappings_count,
+
+      CASE
+        WHEN EXISTS (
+          SELECT 1
+          FROM template_field_mappings tfm
+          WHERE tfm.template_field_id = tf.id
+        )
+        THEN 1
+        ELSE 0
+      END AS is_associated
+
+    FROM template_fields tf
+    WHERE tf.template_id = ?
+    ORDER BY tf.sort_order ASC, tf.id ASC
+    `,
+    [templateId]
+  );
 
     // 4. Devolver la plantilla con su texto y campos.
     return res.json({
@@ -1092,13 +1111,12 @@ router.post('/:id/generate', async (req, res) => {
 
     const template = templateRows[0];
 
-    if (
-      String(template.file_extension).toLowerCase().replace(/^\./, '') !==
-      'docx'
-    ) {
+    const fileExtension = String(template.file_extension).toLowerCase().replace(/^\./, '');
+
+    if (!['docx', 'pdf'].includes(fileExtension)) {
       return res.status(400).json({
         success: false,
-        message: 'La generación A2 está disponible inicialmente para documentos DOCX.'
+        message: 'La generación está disponible para documentos DOCX y PDF.'
       });
     }
 
@@ -1109,19 +1127,30 @@ router.post('/:id/generate', async (req, res) => {
       });
     }
 
-    // 2. Obtener los campos de la plantilla.
+    // 2. Obtener únicamente los campos asociados de la plantilla.
     const [fieldRows]: any = await pool.query(
-      `SELECT id, field_key, label, required
-       FROM template_fields
-       WHERE template_id = ?
-       ORDER BY sort_order ASC, id ASC`,
+      `
+      SELECT
+        tf.id,
+        tf.field_key,
+        tf.label,
+        tf.required
+      FROM template_fields tf
+      WHERE tf.template_id = ?
+        AND EXISTS (
+          SELECT 1
+          FROM template_field_mappings tfm
+          WHERE tfm.template_field_id = tf.id
+        )
+      ORDER BY tf.sort_order ASC, tf.id ASC
+      `,
       [templateId]
     );
 
     if (!fieldRows.length) {
       return res.status(400).json({
         success: false,
-        message: 'La plantilla no tiene campos configurados.'
+        message: 'La plantilla todavía no tiene campos asociados al documento.'
       });
     }
 
@@ -1188,7 +1217,13 @@ router.post('/:id/generate', async (req, res) => {
       'generated'
     );
 
-    const result = await generateDocxFromMappings({
+    const result =
+    fileExtension === 'pdf'? await generatePdfFromMappings({
+      templatePath,
+      outputDirectory,
+      extractedText: template.extracted_text,
+      mappings
+    }) : await generateDocxFromMappings({
       templatePath,
       outputDirectory,
       extractedText: template.extracted_text,
@@ -1219,7 +1254,7 @@ router.post('/:id/generate', async (req, res) => {
         userId,
         templateId,
         result.fileName,
-        'docx',
+        fileExtension,
         storagePath,
         JSON.stringify(values),
         'completed'
